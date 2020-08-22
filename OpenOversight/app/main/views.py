@@ -950,6 +950,26 @@ def download_incidents_csv(department_id):
     return Response(csv, mimetype="text/csv", headers=csv_headers)
 
 
+@main.route('/export/departments')
+def export_departments():
+    departments = {}
+    for d in Department.query.order_by(Department.id).all():
+        departments[d.id] = {**d.toCustomDict(), 'officers': []}
+
+    images = {}
+    for face in Face.query.order_by(Face.id).all():
+        if face.officer_id not in images:
+            images[face.officer_id] = []
+        images[face.officer_id].append(face.image.filepath)
+
+    for officer in Officer.query.order_by(Officer.id).all():
+        officer = {c.name: getattr(officer, c.name) for c in officer.__table__.columns}
+        officer['images'] = images[officer['id']]
+        departments[officer['department_id']]['officers'].append(officer)
+
+    return jsonify({ 'departments': list(departments.values()) })
+
+
 @main.route('/download/all', methods=['GET'])
 def all_data():
     departments = Department.query.all()
