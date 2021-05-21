@@ -36,7 +36,7 @@ class BaseConfig(object):
 
     # Upload Settings
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024
-    ALLOWED_EXTENSIONS = set(['jpeg', 'jpg', 'jpe', 'png', 'gif'])
+    ALLOWED_EXTENSIONS = set(['jpeg', 'jpg', 'jpe', 'png', 'gif', 'webp'])
 
     # User settings
     APPROVE_REGISTRATIONS = os.environ.get('APPROVE_REGISTRATIONS', False)
@@ -50,8 +50,10 @@ class BaseConfig(object):
 
 class DevelopmentConfig(BaseConfig):
     DEBUG = True
+    SQLALCHEMY_ECHO = True
     SQLALCHEMY_DATABASE_URI = os.environ.get('SQLALCHEMY_DATABASE_URI')
     NUM_OFFICERS = 15000
+    SITEMAP_URL_SCHEME = 'http'
 
 
 class TestingConfig(BaseConfig):
@@ -60,10 +62,12 @@ class TestingConfig(BaseConfig):
     WTF_CSRF_ENABLED = False
     NUM_OFFICERS = 120
     APPROVE_REGISTRATIONS = False
+    SITEMAP_URL_SCHEME = 'http'
 
 
 class ProductionConfig(BaseConfig):
     SQLALCHEMY_DATABASE_URI = os.environ.get('SQLALCHEMY_DATABASE_URI')
+    SITEMAP_URL_SCHEME = 'https'
 
     @classmethod
     def init_app(cls, app):  # pragma: no cover
@@ -74,5 +78,5 @@ config = {
     'development': DevelopmentConfig,
     'testing': TestingConfig,
     'production': ProductionConfig,
-    'default': DevelopmentConfig
 }
+config['default'] = config.get(os.environ.get('FLASK_ENV', ""), DevelopmentConfig)

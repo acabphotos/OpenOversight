@@ -1,16 +1,21 @@
 from __future__ import print_function
-from builtins import input
-from getpass import getpass
-import sys
+
 import csv
-from datetime import datetime
+import sys
+from builtins import input
+from datetime import datetime, date
+from dateutil.parser import parse
+from getpass import getpass
+from typing import Dict, List
 
 import click
-from flask.cli import with_appcontext
 from flask import current_app
+from flask.cli import with_appcontext
 
 from .models import db, Assignment, Department, Officer, User, Salary, Job
-from .utils import get_officer, str_is_true
+from .utils import get_officer, str_is_true, normalize_gender, prompt_yes_no
+
+from .csv_imports import import_csv_files
 
 
 @click.command()
@@ -86,8 +91,8 @@ def link_officers_to_department():
 
 
 class ImportLog:
-    updated_officers = {}
-    created_officers = {}
+    updated_officers = {}  # type: Dict[int, List]
+    created_officers = {}  # type: Dict[int, List]
 
     @classmethod
     def log_change(cls, officer, msg):
@@ -152,13 +157,21 @@ def set_field_from_row(row, obj, attribute, allow_blank=True, fieldname=None):
             val = datetime.strptime(row[fieldname], '%Y-%m-%d').date()
         except ValueError:
             val = row[fieldname]
+            if attribute == 'gender':
+                val = normalize_gender(val)
         setattr(obj, attribute, val)
 
 
 def update_officer_from_row(row, officer, update_static_fields=False):
-    def update_officer_field(fieldname, allow_blank=True):
-        if fieldname in row and (row[fieldname] or allow_blank) and \
-                getattr(officer, fieldname) != row[fieldname]:
+    def update_officer_field(fieldname):
+        if fieldname not in row:
+            return
+
+        if fieldname == 'gender':
+            row[fieldname] = normalize_gender(row[fieldname])
+
+        if row[fieldname] and getattr(officer, fieldname) != row[fieldname]:
+
             ImportLog.log_change(
                 officer,
                 'Updated {}: {} --> {}'.format(
@@ -166,10 +179,11 @@ def update_officer_from_row(row, officer, update_static_fields=False):
             setattr(officer, fieldname, row[fieldname])
 
     # Name and gender are the only potentially changeable fields, so update those
-    update_officer_field('last_name', allow_blank=False)
-    update_officer_field('first_name', allow_blank=False)
+    update_officer_field('last_name')
+    update_officer_field('first_name')
     update_officer_field('middle_initial')
-    update_officer_field('suffix', allow_blank=False)
+
+    update_officer_field('suffix')
     update_officer_field('gender')
 
     # The rest should be static
@@ -184,9 +198,26 @@ def update_officer_from_row(row, officer, update_static_fields=False):
             if row[fieldname] == '':
                 row[fieldname] = None
             old_value = getattr(officer, fieldname)
-            new_value = row[fieldname]
+            # If we're expecting a date type, attempt to parse row[fieldname] as a datetime
+            # This also normalizes all date formats, ensuring the following comparison works properly
+            if isinstance(old_value, (date, datetime)):
+                try:
+                    new_value = parse(row[fieldname])
+                    if isinstance(old_value, date):
+                        new_value = new_value.date()
+                except Exception as e:
+                    msg = 'Field {} is a date-type, but "{}" was specified for Officer {} {} and cannot be parsed as a date-type.\nError message from dateutil: {}'.format(
+                        fieldname,
+                        row[fieldname],
+                        officer.first_name,
+                        officer.last_name,
+                        e
+                    )
+                    raise Exception(msg)
+            else:
+                new_value = row[fieldname]
             if old_value is None:
-                update_officer_field(fieldname, new_value)
+                update_officer_field(fieldname)
             elif str(old_value) != str(new_value):
                 msg = 'Officer {} {} has differing {} field. Old: {}, new: {}'.format(
                     officer.first_name,
@@ -197,7 +228,7 @@ def update_officer_from_row(row, officer, update_static_fields=False):
                 )
                 if update_static_fields:
                     print(msg)
-                    update_officer_field(fieldname, new_value)
+                    update_officer_field(fieldname)
                 else:
                     raise Exception(msg)
 
@@ -227,10 +258,40 @@ def create_officer_from_row(row, department_id):
     process_salary(row, officer, compare=False)
 
 
+def is_equal(a, b):
+    """exhaustive equality checking, originally to compare a sqlalchemy result object of various types to a csv string
+    Note: Stringifying covers object cases (as in the datetime example below)
+    >>> is_equal("1", 1)  # string == int
+    True
+    >>> is_equal("foo", "bar") # string != other string
+    False
+    >>> is_equal(1, "1") # int == string
+    True
+    >>> is_equal(1.0, "1") # float == string
+    True
+    >>> is_equal(datetime(2020, 1, 1), "2020-01-01 00:00:00") # datetime == string
+    True
+    """
+    def try_else_false(comparable):
+        try:
+            return comparable(a, b)
+        except TypeError:
+            return False
+        except ValueError:
+            return False
+
+    return any([
+        try_else_false(lambda _a, _b: str(_a) == str(_b)),
+        try_else_false(lambda _a, _b: int(_a) == int(_b)),
+        try_else_false(lambda _a, _b: float(_a) == float(_b))
+    ])
+
+
 def process_assignment(row, officer, compare=False):
     assignment_fields = {
-        'required': ['job_title'],
+        'required': [],
         'optional': [
+            'job_title',
             'star_no',
             'unit_id',
             'star_date',
@@ -252,18 +313,18 @@ def process_assignment(row, officer, compare=False):
                 for fieldname in assignment_fieldnames:
                     current = getattr(assignment, fieldname)
                     # Test if fields match between row and existing assignment
-                    if (current and fieldname in row and row[fieldname] == current) or \
+                    if (current and fieldname in row and is_equal(row[fieldname], current)) or \
                             (not current and (fieldname not in row or not row[fieldname])):
                         i += 1
                 if i == len(assignment_fieldnames):
                     job_title = job.job_title
-                    if (job_title and 'job_title' in row and row['job_title'] == job_title) or \
+                    if (job_title and row.get('job_title', 'Not Sure') == job_title) or \
                             (not job_title and ('job_title' not in row or not row['job_title'])):
                         # Found match, so don't add new assignment
                         add_assignment = False
         if add_assignment:
             job = Job.query\
-                     .filter_by(job_title=row['job_title'],
+                     .filter_by(job_title=row.get('job_title', 'Not Sure'),
                                 department_id=officer.department_id)\
                      .one_or_none()
             if not job:
@@ -349,7 +410,15 @@ def process_salary(row, officer, compare=False):
 @with_appcontext
 def bulk_add_officers(filename, no_create, update_by_name, update_static_fields):
     """Add or update officers from a CSV file."""
+
+    encoding = 'utf-8'
+
+    # handles unicode errors that can occur when the file was made in Excel
     with open(filename, 'r') as f:
+        if u'\ufeff' in f.readline():
+            encoding = 'utf-8-sig'
+
+    with open(filename, 'r', encoding=encoding) as f:
         ImportLog.clear_logs()
         csvfile = csv.DictReader(f)
         departments = {}
@@ -404,11 +473,58 @@ def bulk_add_officers(filename, no_create, update_by_name, update_static_fields)
             elif not no_create:
                 create_officer_from_row(row, department_id)
 
-        db.session.commit()
-
         ImportLog.print_logs()
+        if current_app.config['ENV'] == 'testing' or prompt_yes_no("Do you want to commit the above changes?"):
+            print("Commiting changes.")
+            db.session.commit()
+        else:
+            print("Aborting changes.")
+            db.session.rollback()
+            return 0, 0
 
         return len(ImportLog.created_officers), len(ImportLog.updated_officers)
+
+
+@click.command()
+@click.argument("department-name")
+@click.option("--officers-csv", type=click.Path(exists=True))
+@click.option("--assignments-csv", type=click.Path(exists=True))
+@click.option("--salaries-csv", type=click.Path(exists=True))
+@click.option("--links-csv", type=click.Path(exists=True))
+@click.option("--incidents-csv", type=click.Path(exists=True))
+@click.option("--force-create", is_flag=True, help="Only for development/testing!")
+@with_appcontext
+def advanced_csv_import(
+    department_name,
+    officers_csv,
+    assignments_csv,
+    salaries_csv,
+    links_csv,
+    incidents_csv,
+    force_create,
+):
+    """
+    Add or update officers, assignments, salaries, links and incidents from csv
+    files in the department DEPARTMENT_NAME.
+
+    The csv files are treated as the source of truth.
+    Existing entries might be overwritten as a result, backing up the
+    database and running the command locally first is highly recommended.
+
+    See the documentation before running the command.
+    """
+    if force_create and current_app.config["ENV"] == "production":
+        raise Exception("--force-create cannot be used in production!")
+
+    import_csv_files(
+        department_name,
+        officers_csv,
+        assignments_csv,
+        salaries_csv,
+        links_csv,
+        incidents_csv,
+        force_create,
+    )
 
 
 @click.command()
